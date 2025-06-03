@@ -1,0 +1,177 @@
+---
+- name: Deploy Dockerized MySQL and Webapp on EC2
+  hosts: ec2
+  become: yes
+  vars:
+    aws_region: us-east-1
+    aws_account_id: 164340264957
+    mysql_root_password: yourpassword
+    docker_network: clo835-net
+    webapp_image: "{{ aws_account_id }}.dkr.ecr.{{ aws_region }}.amazonaws.com/webapp:latest"
+    mysql_image: "{{ aws_account_id }}.dkr.ecr.{{ aws_region }}.amazonaws.com/mysql:latest"
+    db_user: "root"
+    db_pwd: "pw"
+    db_port: "3306"
+    db_name: "employees"
+
+  collections:
+    - community.docker
+    - amazon.aws
+
+  tasks:
+    - name: Ensure Python3 and pip are installed
+      yum:
+        name:
+          - python3
+          - python3-pip
+        state: present
+
+    - name: Ensure requests library is available for Ansible
+      pip:
+        name: requests
+        state: present
+        executable: pip3
+
+    - name: Install Docker
+      yum:
+        name: docker
+        state: present
+
+    - name: Start and enable Docker service
+      service:
+        name: docker
+        state: started
+        enabled: yes
+
+    - name: Add ec2-user to docker group
+      user:
+        name: ec2-user
+        groups: docker
+        append: yes
+
+    - name: Install Flask, PyMySQL, Cryptography, compatible Werkzeug, and Requests
+      pip:
+        name:
+          - flask==2.0.1
+          - werkzeug==2.2.2
+          - pymysql==1.0.2
+          - cryptography==38.0.1
+          - requests==2.26.0
+          - urllib3==1.26.18
+        state: present
+        executable: pip3
+
+    - name: Retrieve ECR login password
+      become_user: ec2-user
+      environment:
+        HOME: "/home/ec2-user"
+      shell: |
+        aws ecr get-login-password --region {{ aws_region }}
+      register: ecr_password
+      args:
+        executable: /bin/bash
+
+    - name: Log into ECR registry
+      community.docker.docker_login:
+        registry_url: "{{ aws_account_id }}.dkr.ecr.{{ aws_region }}.amazonaws.com"
+        username: "AWS"
+        password: "{{ ecr_password.stdout }}"
+
+    - name: Create Docker bridge network
+      community.docker.docker_network:
+        name: "{{ docker_network }}"
+        state: present
+
+    - name: Pull MySQL image from ECR
+      community.docker.docker_image:
+        name: "{{ mysql_image }}"
+        source: pull
+
+    - name: Run MySQL container
+      community.docker.docker_container:
+        name: mysql-db
+        image: "{{ mysql_image }}"
+        state: started
+        restart_policy: always
+        env:
+          MYSQL_ROOT_PASSWORD: "{{ mysql_root_password }}"
+        networks:
+          - name: "{{ docker_network }}"
+        detach: true
+
+    - name: Get MySQL container IP
+      shell: docker inspect -f "{{'{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}'}}" mysql-db
+      register: mysql_ip_out
+
+    - name: Set MySQL IP address fact
+      set_fact:
+        mysql_ip: "{{ mysql_ip_out.stdout }}"
+
+    - name: Wait for MySQL to be ready
+      wait_for:
+        host: "{{ mysql_ip }}"
+        port: "{{ db_port }}"
+        delay: 5
+        timeout: 60
+
+    - name: Pull Webapp image from ECR
+      community.docker.docker_image:
+        name: "{{ webapp_image }}"
+        source: pull
+
+    - name: Run Blue webapp container
+      community.docker.docker_container:
+        name: blue
+        image: "{{ webapp_image }}"
+        state: started
+        restart_policy: always
+        env:
+          BACKGROUND_COLOR: "blue"
+          DBHOST: "{{ mysql_ip }}"
+          DBPORT: "{{ db_port }}"
+          DBUSER: "{{ db_user }}"
+          DBPWD: "{{ db_pwd }}"
+          DATABASE: "{{ db_name }}"
+        networks:
+          - name: "{{ docker_network }}"
+        published_ports:
+          - "8081:8080"
+        detach: true
+
+    - name: Run Pink webapp container
+      community.docker.docker_container:
+        name: pink
+        image: "{{ webapp_image }}"
+        state: started
+        restart_policy: always
+        env:
+          BACKGROUND_COLOR: "pink"
+          DBHOST: "{{ mysql_ip }}"
+          DBPORT: "{{ db_port }}"
+          DBUSER: "{{ db_user }}"
+          DBPWD: "{{ db_pwd }}"
+          DATABASE: "{{ db_name }}"
+        networks:
+          - name: "{{ docker_network }}"
+        published_ports:
+          - "8082:8080"
+        detach: true
+
+    - name: Run Lime webapp container
+      community.docker.docker_container:
+        name: lime
+        image: "{{ webapp_image }}"
+        state: started
+        restart_policy: always
+        env:
+          BACKGROUND_COLOR: "lime"
+          DBHOST: "{{ mysql_ip }}"
+          DBPORT: "{{ db_port }}"
+          DBUSER: "{{ db_user }}"
+          DBPWD: "{{ db_pwd }}"
+          DATABASE: "{{ db_name }}"
+        networks:
+          - name: "{{ docker_network }}"
+        published_ports:
+          - "8083:8080"
+        detach: true
